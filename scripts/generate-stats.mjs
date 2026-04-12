@@ -6,13 +6,14 @@ const TOKEN = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
 // --- Theme ---
 const theme = {
   bg: "#0d1117",
-  cardBg: "#161b22",
   border: "#30363d",
   text: "#e6edf3",
   textSecondary: "#7d8590",
   accent: "#58a6ff",
   green: ["#161b22", "#0e4429", "#006d32", "#26a641", "#39d353"],
 };
+
+const font = `-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif`;
 
 // --- GitHub API ---
 async function graphql(query, variables = {}) {
@@ -51,43 +52,12 @@ async function rest(endpoint) {
   return res.json();
 }
 
-async function fetchContributions() {
+// --- Fetch user profile + repos ---
+async function fetchProfile() {
   const query = `
     query($login: String!) {
       user(login: $login) {
-        contributionsCollection {
-          totalCommitContributions
-          totalPullRequestContributions
-          contributionCalendar {
-            totalContributions
-            weeks {
-              contributionDays {
-                contributionCount
-                date
-                weekday
-              }
-            }
-          }
-        }
-      }
-    }
-  `;
-
-  const json = await graphql(query, { login: USERNAME });
-
-  if (json.errors) {
-    console.warn("Contributions query failed:", JSON.stringify(json.errors));
-    return null;
-  }
-
-  return json.data.user.contributionsCollection;
-}
-
-async function fetchRepos() {
-  // Try GraphQL first for richer data
-  const query = `
-    query($login: String!) {
-      user(login: $login) {
+        createdAt
         repositories(first: 100, ownerAffiliations: OWNER, orderBy: { field: UPDATED_AT, direction: DESC }) {
           totalCount
           nodes {
@@ -106,25 +76,93 @@ async function fetchRepos() {
   `;
 
   const json = await graphql(query, { login: USERNAME });
-
   if (json.errors) {
-    console.warn("Repos GraphQL failed, falling back to REST...");
-    const repos = await rest(`/users/${USERNAME}/repos?per_page=100&sort=updated`);
-    return {
-      totalCount: repos.length,
-      nodes: repos.map((r) => ({
-        name: r.name,
-        stargazerCount: r.stargazers_count,
-        languages: { edges: [] },
-      })),
-    };
+    console.warn("Profile query errors:", JSON.stringify(json.errors));
+    return null;
   }
-
-  return json.data.user.repositories;
+  return json.data.user;
 }
 
+// --- Fetch ALL-TIME contributions using aliased year queries ---
+async function fetchAllContributions(createdAt) {
+  const startYear = new Date(createdAt).getFullYear();
+  const now = new Date();
+  const currentYear = now.getFullYear();
+
+  // Build one GraphQL query with an alias per year
+  const contribFragment = `
+    totalCommitContributions
+    totalPullRequestContributions
+    totalIssueContributions
+    restrictedContributionsCount
+    contributionCalendar {
+      totalContributions
+      weeks {
+        contributionDays {
+          contributionCount
+          date
+          weekday
+        }
+      }
+    }
+  `;
+
+  let yearAliases = "";
+  for (let year = startYear; year <= currentYear; year++) {
+    const from = `${year}-01-01T00:00:00Z`;
+    const to =
+      year === currentYear
+        ? now.toISOString()
+        : `${year + 1}-01-01T00:00:00Z`;
+    yearAliases += `y${year}: contributionsCollection(from: "${from}", to: "${to}") { ${contribFragment} }\n`;
+  }
+
+  const query = `query($login: String!) { user(login: $login) { ${yearAliases} } }`;
+  const json = await graphql(query, { login: USERNAME });
+
+  if (json.errors) {
+    console.warn("Contributions query failed:", JSON.stringify(json.errors));
+    return null;
+  }
+
+  // Aggregate all years
+  const userData = json.data.user;
+  let totalCommits = 0;
+  let totalPRs = 0;
+  let totalIssues = 0;
+  let totalContributions = 0;
+  let allWeeks = [];
+
+  for (let year = startYear; year <= currentYear; year++) {
+    const yearData = userData[`y${year}`];
+    if (!yearData) continue;
+
+    totalCommits += yearData.totalCommitContributions;
+    totalPRs += yearData.totalPullRequestContributions;
+    totalIssues += yearData.totalIssueContributions;
+    totalContributions += yearData.contributionCalendar.totalContributions;
+
+    // Collect all calendar weeks
+    allWeeks.push(...yearData.contributionCalendar.weeks);
+  }
+
+  console.log(`  Years queried: ${startYear}-${currentYear} (${currentYear - startYear + 1} years)`);
+  console.log(`  All-time commits: ${totalCommits}`);
+  console.log(`  All-time contributions: ${totalContributions}`);
+
+  return {
+    totalCommits,
+    totalPRs,
+    totalIssues,
+    totalContributions,
+    allWeeks,
+    startYear,
+    yearCount: currentYear - startYear + 1,
+  };
+}
+
+// --- Fallback: REST API for languages ---
 async function fetchLanguagesREST(repos) {
-  // Fallback: fetch languages per repo via REST
   const langMap = {};
   for (const repo of repos.slice(0, 20)) {
     try {
@@ -134,7 +172,7 @@ async function fetchLanguagesREST(repos) {
         langMap[name].size += bytes;
       }
     } catch {
-      // Skip repos we can't access
+      // Skip inaccessible repos
     }
   }
   return langMap;
@@ -168,19 +206,18 @@ function processLanguages(repos) {
 }
 
 function processLanguagesFromMap(langMap) {
+  const colors = {
+    PHP: "#4F5D95", JavaScript: "#f1e05a", TypeScript: "#3178c6",
+    HTML: "#e34c26", CSS: "#563d7c", SCSS: "#c6538c", Shell: "#89e051",
+    Python: "#3572A5", Vue: "#41b883", Blade: "#f7523f", Twig: "#c1d026",
+  };
+
   const sorted = Object.entries(langMap)
     .sort((a, b) => b[1].size - a[1].size)
     .slice(0, 6);
 
   const total = sorted.reduce((sum, [, v]) => sum + v.size, 0);
   if (total === 0) return [];
-
-  // Language colors lookup
-  const colors = {
-    PHP: "#4F5D95", JavaScript: "#f1e05a", TypeScript: "#3178c6",
-    HTML: "#e34c26", CSS: "#563d7c", SCSS: "#c6538c", Shell: "#89e051",
-    Python: "#3572A5", Vue: "#41b883", Blade: "#f7523f", Twig: "#c1d026",
-  };
 
   return sorted.map(([name, { size }]) => ({
     name,
@@ -192,7 +229,8 @@ function processLanguagesFromMap(langMap) {
 function getPeakDays(weeks) {
   const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const days = [0, 0, 0, 0, 0, 0, 0];
-  for (const week of weeks.slice(-52)) {
+  // Use all available weeks for day-of-week pattern
+  for (const week of weeks) {
     for (const day of week.contributionDays) {
       days[day.weekday] += day.contributionCount;
     }
@@ -208,25 +246,26 @@ function getPeakDays(weeks) {
 // --- SVG Generation ---
 function generateSVG({ contributions, repos, languages }) {
   const hasContribs = contributions !== null;
-  const calendar = hasContribs ? contributions.contributionCalendar : null;
-  const weeks = calendar ? calendar.weeks : [];
-  const totalContributions = calendar ? calendar.totalContributions : 0;
-  const totalCommits = hasContribs ? contributions.totalCommitContributions : 0;
-  const totalPRs = hasContribs ? contributions.totalPullRequestContributions : 0;
+  const totalContributions = hasContribs ? contributions.totalContributions : 0;
+  const totalCommits = hasContribs ? contributions.totalCommits : 0;
+  const totalPRs = hasContribs ? contributions.totalPRs : 0;
   const totalRepos = repos.totalCount;
   const totalStars = repos.nodes.reduce((s, r) => s + r.stargazerCount, 0);
-  const heatmapWeeks = weeks.slice(-26);
-  const dayActivity = hasContribs ? getPeakDays(weeks) : [];
 
-  const font = `-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif`;
+  // Use last 26 weeks for heatmap
+  const allWeeks = hasContribs ? contributions.allWeeks : [];
+  const heatmapWeeks = allWeeks.slice(-26);
+  // Use ALL weeks for day-of-week pattern (all-time data)
+  const dayActivity = hasContribs ? getPeakDays(allWeeks) : [];
+
   const width = 840;
   const height = hasContribs ? 520 : 340;
 
   // --- Metric cards ---
   const metrics = hasContribs
     ? [
-        { label: "Contributions", value: totalContributions },
-        { label: "Commits", value: totalCommits },
+        { label: "All-Time Contributions", value: totalContributions },
+        { label: "All-Time Commits", value: totalCommits },
         { label: "Repositories", value: totalRepos },
         { label: "Stars", value: totalStars },
       ]
@@ -241,8 +280,8 @@ function generateSVG({ contributions, repos, languages }) {
     .map((m, i) => {
       const x = i * metricSpacing + metricSpacing / 2;
       return `
-      <text x="${x}" y="90" fill="${theme.accent}" font-size="28" font-weight="700" text-anchor="middle" font-family="${font}">${m.value.toLocaleString()}</text>
-      <text x="${x}" y="112" fill="${theme.textSecondary}" font-size="12" text-anchor="middle" font-family="${font}">${m.label}</text>`;
+      <text x="${x}" y="88" fill="${theme.accent}" font-size="28" font-weight="700" text-anchor="middle" font-family="${font}">${m.value.toLocaleString()}</text>
+      <text x="${x}" y="108" fill="${theme.textSecondary}" font-size="11" text-anchor="middle" font-family="${font}">${m.label}</text>`;
     })
     .join("\n");
 
@@ -309,7 +348,7 @@ function generateSVG({ contributions, repos, languages }) {
     })
     .join("\n");
 
-  // --- Weekly activity bars ---
+  // --- Weekly activity bars (all-time pattern) ---
   const actX = 510;
   const actY = 430;
   const activitySVG = dayActivity
@@ -324,12 +363,16 @@ function generateSVG({ contributions, repos, languages }) {
     })
     .join("\n");
 
-  // --- Timestamp ---
+  // --- Timestamp & member info ---
   const timestamp = new Date().toLocaleDateString("en-US", {
     year: "numeric",
     month: "short",
     day: "numeric",
   });
+
+  const memberSince = hasContribs
+    ? `Member since ${contributions.startYear}`
+    : "";
 
   // --- Compose SVG ---
   let contribSection = "";
@@ -338,8 +381,10 @@ function generateSVG({ contributions, repos, languages }) {
   <!-- Heatmap Section -->
   <text x="30" y="170" fill="${theme.text}" font-size="13" font-weight="600" font-family="${font}">Contribution Activity</text>
   <text x="30" y="188" fill="${theme.textSecondary}" font-size="11" font-family="${font}">Last 26 weeks</text>
+
   ${dayLabelsSVG}
   ${heatmapCells}
+
   <text x="${heatmapX}" y="${legendY + 10}" fill="${theme.textSecondary}" font-size="10" font-family="${font}">Less</text>
   ${legendSVG}
   <text x="${heatmapX + 30 + 5 * 18 + 4}" y="${legendY + 10}" fill="${theme.textSecondary}" font-size="10" font-family="${font}">More</text>
@@ -349,25 +394,22 @@ function generateSVG({ contributions, repos, languages }) {
   <text x="${langX}" y="188" fill="${theme.textSecondary}" font-size="11" font-family="${font}">By repository size</text>
   ${languageSVG}
 
-  <!-- Weekly Activity Section -->
+  <!-- Weekly Activity Section (All-Time) -->
   <text x="${actX}" y="${actY - 70}" fill="${theme.text}" font-size="13" font-weight="600" font-family="${font}">Weekly Pattern</text>
-  <text x="${actX}" y="${actY - 55}" fill="${theme.textSecondary}" font-size="11" font-family="${font}">Commits by day of week</text>
+  <text x="${actX}" y="${actY - 55}" fill="${theme.textSecondary}" font-size="11" font-family="${font}">All-time commits by day</text>
   ${activitySVG}`;
   } else {
-    // Fallback: just show languages below metrics
-    const fallbackLangX = 30;
-    const fallbackLangY = 170;
     contribSection = `
   <text x="30" y="155" fill="${theme.text}" font-size="13" font-weight="600" font-family="${font}">Top Languages</text>
   ${languages
     .map((lang, i) => {
-      const y = fallbackLangY + i * 28;
+      const y = 170 + i * 28;
       const w = (lang.percent / 100) * (width - 60);
       return `
-      <text x="${fallbackLangX}" y="${y}" fill="${theme.text}" font-size="12" font-family="${font}">${lang.name}</text>
+      <text x="30" y="${y}" fill="${theme.text}" font-size="12" font-family="${font}">${lang.name}</text>
       <text x="${width - 30}" y="${y}" fill="${theme.textSecondary}" font-size="11" text-anchor="end" font-family="${font}">${lang.percent}%</text>
-      <rect x="${fallbackLangX}" y="${y + 4}" width="${width - 60}" height="8" rx="4" fill="${theme.border}" />
-      <rect x="${fallbackLangX}" y="${y + 4}" width="${w}" height="8" rx="4" fill="${lang.color}" />`;
+      <rect x="30" y="${y + 4}" width="${width - 60}" height="8" rx="4" fill="${theme.border}" />
+      <rect x="30" y="${y + 4}" width="${w}" height="8" rx="4" fill="${lang.color}" />`;
     })
     .join("\n")}`;
   }
@@ -379,14 +421,15 @@ function generateSVG({ contributions, repos, languages }) {
 
   <!-- Header -->
   <text x="30" y="42" fill="${theme.text}" font-size="16" font-weight="600" font-family="${font}">GitHub Activity</text>
-  <text x="${width - 30}" y="42" fill="${theme.textSecondary}" font-size="11" text-anchor="end" font-family="${font}">Updated ${timestamp}</text>
+  <text x="${width - 30}" y="32" fill="${theme.textSecondary}" font-size="11" text-anchor="end" font-family="${font}">${memberSince}</text>
+  <text x="${width - 30}" y="48" fill="${theme.textSecondary}" font-size="10" text-anchor="end" font-family="${font}">Updated ${timestamp}</text>
   <line x1="30" y1="55" x2="${width - 30}" y2="55" stroke="${theme.border}" stroke-width="1" />
 
   <!-- Metrics -->
   ${metricsSVG}
 
   <!-- Divider -->
-  <line x1="30" y1="135" x2="${width - 30}" y2="135" stroke="${theme.border}" stroke-width="1" />
+  <line x1="30" y1="130" x2="${width - 30}" y2="130" stroke="${theme.border}" stroke-width="1" />
 
   ${contribSection}
 
@@ -408,32 +451,36 @@ async function main() {
 
   console.log(`Token present: ${TOKEN.slice(0, 4)}...${TOKEN.slice(-4)}`);
 
-  // Fetch repos (should always work)
-  console.log("Fetching repositories...");
-  const repos = await fetchRepos();
-  console.log(`Found ${repos.totalCount} repositories.`);
+  // 1. Fetch profile + repos
+  console.log("Fetching profile and repositories...");
+  const profile = await fetchProfile();
+  if (!profile) {
+    console.error("Could not fetch profile data.");
+    process.exit(1);
+  }
+  console.log(`  Repos: ${profile.repositories.totalCount}`);
+  console.log(`  Account created: ${profile.createdAt}`);
 
-  // Process languages
-  let languages = processLanguages(repos.nodes);
+  // 2. Process languages
+  let languages = processLanguages(profile.repositories.nodes);
   if (languages.length === 0) {
-    console.log("No languages from GraphQL, trying REST fallback...");
-    const langMap = await fetchLanguagesREST(repos.nodes);
+    console.log("  No languages from GraphQL, trying REST fallback...");
+    const langMap = await fetchLanguagesREST(profile.repositories.nodes);
     languages = processLanguagesFromMap(langMap);
   }
-  console.log(`Languages: ${languages.map((l) => l.name).join(", ")}`);
+  console.log(`  Languages: ${languages.map((l) => `${l.name} ${l.percent}%`).join(", ")}`);
 
-  // Fetch contributions (might fail without PAT)
-  console.log("Fetching contributions...");
-  const contributions = await fetchContributions();
-  if (contributions) {
-    console.log(`Total contributions: ${contributions.contributionCalendar.totalContributions}`);
-  } else {
-    console.warn("Could not fetch contribution data. Add a PAT with read:user scope as GH_TOKEN secret for full stats.");
-  }
+  // 3. Fetch ALL-TIME contributions (year by year)
+  console.log("Fetching all-time contributions...");
+  const contributions = await fetchAllContributions(profile.createdAt);
 
-  // Generate SVG
+  // 4. Generate SVG
   console.log("Generating SVG...");
-  const svg = generateSVG({ contributions, repos, languages });
+  const svg = generateSVG({
+    contributions,
+    repos: profile.repositories,
+    languages,
+  });
 
   writeFileSync("stats.svg", svg);
   console.log("stats.svg written successfully.");
