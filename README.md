@@ -74,6 +74,17 @@ Visit **[unique-design.nl](https://unique-design.nl)** to see our work.
 
 ---
 
+### What I Do
+
+```text
+WordPress Development    ████████████████████░░   Custom themes, plugins & Gutenberg blocks
+API Integrations         ██████████████████░░░░   REST APIs, webhooks & third-party connections
+Performance & Hosting    ████████████████░░░░░░   Server optimization, caching & CDN setup
+AI-Powered Workflows     ██████████████░░░░░░░░   Automation with Claude, n8n & custom tooling
+```
+
+---
+
 ### Activity
 
 <div align="center">

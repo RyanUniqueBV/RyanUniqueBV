@@ -248,32 +248,30 @@ function generateSVG({ contributions, repos, languages }) {
   const hasContribs = contributions !== null;
   const totalContributions = hasContribs ? contributions.totalContributions : 0;
   const totalCommits = hasContribs ? contributions.totalCommits : 0;
-  const totalPRs = hasContribs ? contributions.totalPRs : 0;
   const totalRepos = repos.totalCount;
   const totalStars = repos.nodes.reduce((s, r) => s + r.stargazerCount, 0);
-
-  // Use last 26 weeks for heatmap
   const allWeeks = hasContribs ? contributions.allWeeks : [];
-  const heatmapWeeks = allWeeks.slice(-26);
-  // Use ALL weeks for day-of-week pattern (all-time data)
-  const dayActivity = hasContribs ? getPeakDays(allWeeks) : [];
+
+  // Determine if we have enough data for the full two-column layout
+  const isSparse = totalContributions < 50 || languages.length <= 1;
 
   const width = 840;
-  const height = hasContribs ? 520 : 340;
 
-  // --- Metric cards ---
-  const metrics = hasContribs
-    ? [
-        { label: "All-Time Contributions", value: totalContributions },
-        { label: "All-Time Commits", value: totalCommits },
-        { label: "Repositories", value: totalRepos },
-        { label: "Stars", value: totalStars },
-      ]
-    : [
-        { label: "Repositories", value: totalRepos },
-        { label: "Stars", value: totalStars },
-        { label: "Languages", value: languages.length },
-      ];
+  const timestamp = new Date().toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+
+  const memberSince = hasContribs ? `Member since ${contributions.startYear}` : "";
+
+  // --- Metrics row ---
+  const metrics = [
+    { label: "Contributions", value: totalContributions },
+    { label: "Commits", value: totalCommits },
+    { label: "Repositories", value: totalRepos },
+    { label: "Stars", value: totalStars },
+  ].filter((m) => hasContribs || m.label === "Repositories" || m.label === "Stars");
 
   const metricSpacing = width / metrics.length;
   const metricsSVG = metrics
@@ -285,22 +283,113 @@ function generateSVG({ contributions, repos, languages }) {
     })
     .join("\n");
 
-  // --- Heatmap ---
+  // =============================================
+  // COMPACT LAYOUT (sparse data)
+  // Single column: heatmap full-width, then languages + weekly side by side below
+  // =============================================
+  if (isSparse) {
+    const height = 310;
+
+    // Compact heatmap — full width, last 26 weeks
+    const heatmapWeeks = allWeeks.slice(-26);
+    const cellSize = 11;
+    const cellGap = 2;
+    const heatmapX = 50;
+    const heatmapY = 160;
+
+    let maxC = 0;
+    for (const w of heatmapWeeks)
+      for (const d of w.contributionDays)
+        if (d.contributionCount > maxC) maxC = d.contributionCount;
+
+    function getColor(count) {
+      if (count === 0 || maxC === 0) return theme.green[0];
+      const r = count / maxC;
+      if (r < 0.25) return theme.green[1];
+      if (r < 0.5) return theme.green[2];
+      if (r < 0.75) return theme.green[3];
+      return theme.green[4];
+    }
+
+    let cells = "";
+    for (let w = 0; w < heatmapWeeks.length; w++) {
+      for (const day of heatmapWeeks[w].contributionDays) {
+        const x = heatmapX + w * (cellSize + cellGap);
+        const y = heatmapY + day.weekday * (cellSize + cellGap);
+        cells += `<rect x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" rx="2" fill="${getColor(day.contributionCount)}"><title>${day.date}: ${day.contributionCount}</title></rect>\n`;
+      }
+    }
+
+    const dayLabels = ["", "Mon", "", "Wed", "", "Fri", ""];
+    const dayLabelsSVG = dayLabels
+      .map((label, i) => {
+        if (!label) return "";
+        const y = heatmapY + i * (cellSize + cellGap) + cellSize / 2 + 3;
+        return `<text x="${heatmapX - 8}" y="${y}" fill="${theme.textSecondary}" font-size="9" text-anchor="end" font-family="${font}">${label}</text>`;
+      })
+      .join("\n");
+
+    // Languages as inline dots + labels on the right
+    const langY = heatmapY + 2;
+    const langX = 420;
+    const langBarW = width - langX - 30;
+    const languageSVG = languages
+      .map((lang, i) => {
+        const y = langY + i * 26;
+        const w = (lang.percent / 100) * langBarW;
+        return `
+        <circle cx="${langX}" cy="${y - 3}" r="4" fill="${lang.color}" />
+        <text x="${langX + 12}" y="${y}" fill="${theme.text}" font-size="11" font-family="${font}">${lang.name}</text>
+        <text x="${width - 30}" y="${y}" fill="${theme.textSecondary}" font-size="10" text-anchor="end" font-family="${font}">${lang.percent}%</text>
+        <rect x="${langX}" y="${y + 5}" width="${langBarW}" height="6" rx="3" fill="${theme.border}" />
+        <rect x="${langX}" y="${y + 5}" width="${w}" height="6" rx="3" fill="${lang.color}" />`;
+      })
+      .join("\n");
+
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" fill="none">
+  <rect width="${width}" height="${height}" rx="12" fill="${theme.bg}" />
+  <rect width="${width}" height="${height}" rx="12" fill="none" stroke="${theme.border}" stroke-width="1" />
+
+  <text x="30" y="42" fill="${theme.text}" font-size="16" font-weight="600" font-family="${font}">GitHub Activity</text>
+  <text x="${width - 30}" y="32" fill="${theme.textSecondary}" font-size="11" text-anchor="end" font-family="${font}">${memberSince}</text>
+  <text x="${width - 30}" y="48" fill="${theme.textSecondary}" font-size="10" text-anchor="end" font-family="${font}">Updated ${timestamp}</text>
+  <line x1="30" y1="55" x2="${width - 30}" y2="55" stroke="${theme.border}" stroke-width="1" />
+
+  ${metricsSVG}
+
+  <line x1="30" y1="130" x2="${width - 30}" y2="130" stroke="${theme.border}" stroke-width="1" />
+
+  <text x="30" y="152" fill="${theme.text}" font-size="12" font-weight="600" font-family="${font}">Recent Activity</text>
+  ${dayLabelsSVG}
+  ${cells}
+
+  ${languages.length > 0 ? `<text x="${langX}" y="152" fill="${theme.text}" font-size="12" font-weight="600" font-family="${font}">Languages</text>` : ""}
+  ${languageSVG}
+
+  <line x1="30" y1="${height - 35}" x2="${width - 30}" y2="${height - 35}" stroke="${theme.border}" stroke-width="1" />
+  <text x="${width / 2}" y="${height - 14}" fill="${theme.textSecondary}" font-size="10" text-anchor="middle" font-family="${font}">Generated with a custom GitHub Action</text>
+</svg>`;
+  }
+
+  // =============================================
+  // FULL LAYOUT (enough data for two-column)
+  // =============================================
+  const height = 520;
+  const heatmapWeeks = allWeeks.slice(-26);
+  const dayActivity = getPeakDays(allWeeks);
+
   const cellSize = 14;
   const cellGap = 3;
   const heatmapX = 50;
   const heatmapY = 200;
 
   let maxContrib = 0;
-  for (const week of heatmapWeeks) {
-    for (const day of week.contributionDays) {
+  for (const week of heatmapWeeks)
+    for (const day of week.contributionDays)
       if (day.contributionCount > maxContrib) maxContrib = day.contributionCount;
-    }
-  }
 
   function getColor(count) {
-    if (count === 0) return theme.green[0];
-    if (maxContrib === 0) return theme.green[0];
+    if (count === 0 || maxContrib === 0) return theme.green[0];
     const ratio = count / maxContrib;
     if (ratio < 0.25) return theme.green[1];
     if (ratio < 0.5) return theme.green[2];
@@ -313,7 +402,7 @@ function generateSVG({ contributions, repos, languages }) {
     for (const day of heatmapWeeks[w].contributionDays) {
       const x = heatmapX + w * (cellSize + cellGap);
       const y = heatmapY + day.weekday * (cellSize + cellGap);
-      heatmapCells += `<rect x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" rx="3" fill="${getColor(day.contributionCount)}"><title>${day.date}: ${day.contributionCount} contributions</title></rect>\n`;
+      heatmapCells += `<rect x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" rx="3" fill="${getColor(day.contributionCount)}"><title>${day.date}: ${day.contributionCount}</title></rect>\n`;
     }
   }
 
@@ -331,7 +420,6 @@ function generateSVG({ contributions, repos, languages }) {
     .map((c, i) => `<rect x="${heatmapX + 30 + i * 18}" y="${legendY}" width="12" height="12" rx="2" fill="${c}" />`)
     .join("\n  ");
 
-  // --- Languages ---
   const langX = 510;
   const langY = 200;
   const barWidth = 280;
@@ -348,7 +436,6 @@ function generateSVG({ contributions, repos, languages }) {
     })
     .join("\n");
 
-  // --- Weekly activity bars (all-time pattern) ---
   const actX = 510;
   const actY = 430;
   const activitySVG = dayActivity
@@ -363,77 +450,35 @@ function generateSVG({ contributions, repos, languages }) {
     })
     .join("\n");
 
-  // --- Timestamp & member info ---
-  const timestamp = new Date().toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
-
-  const memberSince = hasContribs
-    ? `Member since ${contributions.startYear}`
-    : "";
-
-  // --- Compose SVG ---
-  let contribSection = "";
-  if (hasContribs) {
-    contribSection = `
-  <!-- Heatmap Section -->
-  <text x="30" y="170" fill="${theme.text}" font-size="13" font-weight="600" font-family="${font}">Contribution Activity</text>
-  <text x="30" y="188" fill="${theme.textSecondary}" font-size="11" font-family="${font}">Last 26 weeks</text>
-
-  ${dayLabelsSVG}
-  ${heatmapCells}
-
-  <text x="${heatmapX}" y="${legendY + 10}" fill="${theme.textSecondary}" font-size="10" font-family="${font}">Less</text>
-  ${legendSVG}
-  <text x="${heatmapX + 30 + 5 * 18 + 4}" y="${legendY + 10}" fill="${theme.textSecondary}" font-size="10" font-family="${font}">More</text>
-
-  <!-- Languages Section -->
-  <text x="${langX}" y="170" fill="${theme.text}" font-size="13" font-weight="600" font-family="${font}">Top Languages</text>
-  <text x="${langX}" y="188" fill="${theme.textSecondary}" font-size="11" font-family="${font}">By repository size</text>
-  ${languageSVG}
-
-  <!-- Weekly Activity Section (All-Time) -->
-  <text x="${actX}" y="${actY - 70}" fill="${theme.text}" font-size="13" font-weight="600" font-family="${font}">Weekly Pattern</text>
-  <text x="${actX}" y="${actY - 55}" fill="${theme.textSecondary}" font-size="11" font-family="${font}">All-time commits by day</text>
-  ${activitySVG}`;
-  } else {
-    contribSection = `
-  <text x="30" y="155" fill="${theme.text}" font-size="13" font-weight="600" font-family="${font}">Top Languages</text>
-  ${languages
-    .map((lang, i) => {
-      const y = 170 + i * 28;
-      const w = (lang.percent / 100) * (width - 60);
-      return `
-      <text x="30" y="${y}" fill="${theme.text}" font-size="12" font-family="${font}">${lang.name}</text>
-      <text x="${width - 30}" y="${y}" fill="${theme.textSecondary}" font-size="11" text-anchor="end" font-family="${font}">${lang.percent}%</text>
-      <rect x="30" y="${y + 4}" width="${width - 60}" height="8" rx="4" fill="${theme.border}" />
-      <rect x="30" y="${y + 4}" width="${w}" height="8" rx="4" fill="${lang.color}" />`;
-    })
-    .join("\n")}`;
-  }
-
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" fill="none">
-  <!-- Background -->
   <rect width="${width}" height="${height}" rx="12" fill="${theme.bg}" />
   <rect width="${width}" height="${height}" rx="12" fill="none" stroke="${theme.border}" stroke-width="1" />
 
-  <!-- Header -->
   <text x="30" y="42" fill="${theme.text}" font-size="16" font-weight="600" font-family="${font}">GitHub Activity</text>
   <text x="${width - 30}" y="32" fill="${theme.textSecondary}" font-size="11" text-anchor="end" font-family="${font}">${memberSince}</text>
   <text x="${width - 30}" y="48" fill="${theme.textSecondary}" font-size="10" text-anchor="end" font-family="${font}">Updated ${timestamp}</text>
   <line x1="30" y1="55" x2="${width - 30}" y2="55" stroke="${theme.border}" stroke-width="1" />
 
-  <!-- Metrics -->
   ${metricsSVG}
 
-  <!-- Divider -->
   <line x1="30" y1="130" x2="${width - 30}" y2="130" stroke="${theme.border}" stroke-width="1" />
 
-  ${contribSection}
+  <text x="30" y="170" fill="${theme.text}" font-size="13" font-weight="600" font-family="${font}">Contribution Activity</text>
+  <text x="30" y="188" fill="${theme.textSecondary}" font-size="11" font-family="${font}">Last 26 weeks</text>
+  ${dayLabelsSVG}
+  ${heatmapCells}
+  <text x="${heatmapX}" y="${legendY + 10}" fill="${theme.textSecondary}" font-size="10" font-family="${font}">Less</text>
+  ${legendSVG}
+  <text x="${heatmapX + 30 + 5 * 18 + 4}" y="${legendY + 10}" fill="${theme.textSecondary}" font-size="10" font-family="${font}">More</text>
 
-  <!-- Footer -->
+  <text x="${langX}" y="170" fill="${theme.text}" font-size="13" font-weight="600" font-family="${font}">Top Languages</text>
+  <text x="${langX}" y="188" fill="${theme.textSecondary}" font-size="11" font-family="${font}">By repository size</text>
+  ${languageSVG}
+
+  <text x="${actX}" y="${actY - 70}" fill="${theme.text}" font-size="13" font-weight="600" font-family="${font}">Weekly Pattern</text>
+  <text x="${actX}" y="${actY - 55}" fill="${theme.textSecondary}" font-size="11" font-family="${font}">All-time commits by day</text>
+  ${activitySVG}
+
   <line x1="30" y1="${height - 35}" x2="${width - 30}" y2="${height - 35}" stroke="${theme.border}" stroke-width="1" />
   <text x="${width / 2}" y="${height - 14}" fill="${theme.textSecondary}" font-size="10" text-anchor="middle" font-family="${font}">Generated with a custom GitHub Action</text>
 </svg>`;
