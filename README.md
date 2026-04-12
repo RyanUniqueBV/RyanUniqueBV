@@ -2,7 +2,7 @@
 
 # Ryan van Brunschot
 
-**Founder & Lead Developer at [Unique Design B.V.](https://unique-design.nl)**
+**Founder at [Unique Design B.V.](https://unique-design.nl)**
 
 Tilburg, The Netherlands
 
@@ -74,13 +74,19 @@ Visit **[unique-design.nl](https://unique-design.nl)** to see our work.
 
 ---
 
-### GitHub Stats
+### What I Do
+
+```text
+WordPress Development    ████████████████████░░   Custom themes, plugins & Gutenberg blocks
+API Integrations         ██████████████████░░░░   REST APIs, webhooks & third-party connections
+Performance & Hosting    ████████████████░░░░░░   Server optimization, caching & CDN setup
+AI-Powered Workflows     ██████████████░░░░░░░░   Automation with Claude, n8n & custom tooling
+```
+
+---
 
 <div align="center">
-  <img src="https://github-readme-stats.vercel.app/api?username=RyanUniqueBV&theme=dark&hide_border=true&include_all_commits=true&count_private=true&bg_color=0d1117&title_color=58a6ff&text_color=c9d1d9&icon_color=58a6ff" height="160" />
-  <img src="https://nirzak-streak-stats.vercel.app/?user=RyanUniqueBV&theme=dark&hide_border=true&background=0d1117&ring=58a6ff&fire=58a6ff&currStreakLabel=58a6ff" height="160" />
-</div>
 
-<div align="center">
-  <img src="https://github-readme-stats.vercel.app/api/top-langs/?username=RyanUniqueBV&theme=dark&hide_border=true&layout=compact&bg_color=0d1117&title_color=58a6ff&text_color=c9d1d9" width="340" />
+*Building digital products that are fast, clean, and built to last.*
+
 </div>
