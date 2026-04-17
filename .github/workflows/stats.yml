@@ -26,6 +26,9 @@ jobs:
           node-version: "22"
 
       - name: Generate stats SVG
+        # GH_TOKEN must be a classic PAT with scopes: read:user, read:org, repo
+        # github.token fallback only sees public data on this repo and will miss
+        # organization + private contributions.
         run: node scripts/generate-stats.mjs
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}

@@ -52,7 +52,7 @@ async function rest(endpoint) {
   return res.json();
 }
 
-// --- Fetch user profile + repos ---
+// --- Fetch user profile + repos + organizations ---
 async function fetchProfile() {
   const query = `
     query($login: String!) {
@@ -71,6 +71,14 @@ async function fetchProfile() {
             }
           }
         }
+        organizations(first: 20) {
+          totalCount
+          nodes {
+            id
+            login
+            name
+          }
+        }
       }
     }
   `;
@@ -81,6 +89,77 @@ async function fetchProfile() {
     return null;
   }
   return json.data.user;
+}
+
+// --- Fetch per-organization contributions (commits, PRs, issues) ---
+async function fetchOrgContributions(orgs, createdAt) {
+  if (!orgs || orgs.length === 0) return [];
+
+  const startYear = new Date(createdAt).getFullYear();
+  const now = new Date();
+  const currentYear = now.getFullYear();
+
+  const fragment = `
+    totalCommitContributions
+    totalPullRequestContributions
+    totalIssueContributions
+    restrictedContributionsCount
+  `;
+
+  let aliases = "";
+  for (const org of orgs) {
+    const safe = org.login.replace(/[^a-zA-Z0-9]/g, "_");
+    for (let year = startYear; year <= currentYear; year++) {
+      const from = `${year}-01-01T00:00:00Z`;
+      const to =
+        year === currentYear
+          ? now.toISOString()
+          : `${year + 1}-01-01T00:00:00Z`;
+      aliases += `${safe}_${year}: contributionsCollection(organizationID: "${org.id}", from: "${from}", to: "${to}") { ${fragment} }\n`;
+    }
+  }
+
+  const query = `query($login: String!) { user(login: $login) { ${aliases} } }`;
+
+  try {
+    const json = await graphql(query, { login: USERNAME });
+    if (json.errors) {
+      console.warn("Org contributions query errors:", JSON.stringify(json.errors));
+      return [];
+    }
+
+    const result = [];
+    for (const org of orgs) {
+      const safe = org.login.replace(/[^a-zA-Z0-9]/g, "_");
+      let commits = 0, prs = 0, issues = 0, restricted = 0;
+      for (let year = startYear; year <= currentYear; year++) {
+        const data = json.data.user[`${safe}_${year}`];
+        if (!data) continue;
+        commits += data.totalCommitContributions;
+        prs += data.totalPullRequestContributions;
+        issues += data.totalIssueContributions;
+        restricted += data.restrictedContributionsCount;
+      }
+      const total = commits + prs + issues + restricted;
+      if (total > 0) {
+        result.push({
+          login: org.login,
+          name: org.name || org.login,
+          commits,
+          prs,
+          issues,
+          restricted,
+          total,
+        });
+      }
+    }
+
+    result.sort((a, b) => b.total - a.total);
+    return result;
+  } catch (err) {
+    console.warn("Org contributions fetch failed:", err.message);
+    return [];
+  }
 }
 
 // --- Fetch ALL-TIME contributions using aliased year queries ---
@@ -131,6 +210,7 @@ async function fetchAllContributions(createdAt) {
   let totalPRs = 0;
   let totalIssues = 0;
   let totalContributions = 0;
+  let totalRestricted = 0;
   let allWeeks = [];
 
   for (let year = startYear; year <= currentYear; year++) {
@@ -141,20 +221,25 @@ async function fetchAllContributions(createdAt) {
     totalPRs += yearData.totalPullRequestContributions;
     totalIssues += yearData.totalIssueContributions;
     totalContributions += yearData.contributionCalendar.totalContributions;
+    totalRestricted += yearData.restrictedContributionsCount;
 
     // Collect all calendar weeks
     allWeeks.push(...yearData.contributionCalendar.weeks);
   }
 
+  // Include restricted (private) contributions that the calendar doesn't expose
+  totalContributions += totalRestricted;
+
   console.log(`  Years queried: ${startYear}-${currentYear} (${currentYear - startYear + 1} years)`);
   console.log(`  All-time commits: ${totalCommits}`);
-  console.log(`  All-time contributions: ${totalContributions}`);
+  console.log(`  All-time contributions: ${totalContributions} (incl. ${totalRestricted} restricted)`);
 
   return {
     totalCommits,
     totalPRs,
     totalIssues,
     totalContributions,
+    totalRestricted,
     allWeeks,
     startYear,
     yearCount: currentYear - startYear + 1,
@@ -244,7 +329,7 @@ function getPeakDays(weeks) {
 }
 
 // --- SVG Generation ---
-function generateSVG({ contributions, repos, languages }) {
+function generateSVG({ contributions, repos, languages, orgContribs = [] }) {
   const hasContribs = contributions !== null;
   const totalContributions = hasContribs ? contributions.totalContributions : 0;
   const totalCommits = hasContribs ? contributions.totalCommits : 0;
@@ -252,8 +337,11 @@ function generateSVG({ contributions, repos, languages }) {
   const totalStars = repos.nodes.reduce((s, r) => s + r.stargazerCount, 0);
   const allWeeks = hasContribs ? contributions.allWeeks : [];
 
+  const orgTotalCommits = orgContribs.reduce((s, o) => s + o.commits, 0);
+  const hasOrgActivity = orgContribs.length > 0 && orgContribs.some((o) => o.total > 0);
+
   // Determine if we have enough data for the full two-column layout
-  const isSparse = totalContributions < 50 || languages.length <= 1;
+  const isSparse = (totalContributions < 50 || languages.length <= 1) && !hasOrgActivity;
 
   const width = 840;
 
@@ -374,7 +462,14 @@ function generateSVG({ contributions, repos, languages }) {
   // =============================================
   // FULL LAYOUT (enough data for two-column)
   // =============================================
-  const height = 520;
+  const orgsToShow = orgContribs.slice(0, 5);
+  const orgHasData = orgsToShow.length > 0;
+  const orgRowHeight = 30;
+  const orgSectionStart = 500;
+  const orgRowsStart = orgSectionStart + 40;
+  const orgRowsEnd = orgRowsStart + orgsToShow.length * orgRowHeight;
+  const height = orgHasData ? orgRowsEnd + 50 : 520;
+
   const heatmapWeeks = allWeeks.slice(-26);
   const dayActivity = getPeakDays(allWeeks);
 
@@ -450,6 +545,35 @@ function generateSVG({ contributions, repos, languages }) {
     })
     .join("\n");
 
+  // Organizations section (only when data is available)
+  let orgSectionSVG = "";
+  if (orgHasData) {
+    const maxOrgCommits = Math.max(...orgsToShow.map((o) => o.commits), 1);
+    const orgBarX = 240;
+    const orgBarWidth = 340;
+    const orgMetaX = width - 30;
+
+    const rowsSVG = orgsToShow
+      .map((org, i) => {
+        const rowY = orgRowsStart + i * orgRowHeight;
+        const ratio = org.commits / maxOrgCommits;
+        const barW = ratio * orgBarWidth;
+        const meta = `${org.commits.toLocaleString()} commits · ${org.prs} PRs · ${org.issues} issues`;
+        return `
+      <text x="30" y="${rowY + 12}" fill="${theme.text}" font-size="12" font-weight="500" font-family="${font}">${escapeXml(org.name)}</text>
+      <rect x="${orgBarX}" y="${rowY + 4}" width="${orgBarWidth}" height="10" rx="5" fill="${theme.border}" />
+      <rect x="${orgBarX}" y="${rowY + 4}" width="${barW}" height="10" rx="5" fill="${theme.accent}" />
+      <text x="${orgMetaX}" y="${rowY + 12}" fill="${theme.textSecondary}" font-size="10" text-anchor="end" font-family="${font}">${meta}</text>`;
+      })
+      .join("\n");
+
+    orgSectionSVG = `
+  <line x1="30" y1="${orgSectionStart - 15}" x2="${width - 30}" y2="${orgSectionStart - 15}" stroke="${theme.border}" stroke-width="1" />
+  <text x="30" y="${orgSectionStart + 5}" fill="${theme.text}" font-size="13" font-weight="600" font-family="${font}">Organizations</text>
+  <text x="30" y="${orgSectionStart + 22}" fill="${theme.textSecondary}" font-size="11" font-family="${font}">Contributions across ${orgContribs.length} organization${orgContribs.length === 1 ? "" : "s"}${orgTotalCommits ? ` · ${orgTotalCommits.toLocaleString()} total commits` : ""}</text>
+  ${rowsSVG}`;
+  }
+
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" fill="none">
   <rect width="${width}" height="${height}" rx="12" fill="${theme.bg}" />
   <rect width="${width}" height="${height}" rx="12" fill="none" stroke="${theme.border}" stroke-width="1" />
@@ -478,10 +602,20 @@ function generateSVG({ contributions, repos, languages }) {
   <text x="${actX}" y="${actY - 70}" fill="${theme.text}" font-size="13" font-weight="600" font-family="${font}">Weekly Pattern</text>
   <text x="${actX}" y="${actY - 55}" fill="${theme.textSecondary}" font-size="11" font-family="${font}">All-time commits by day</text>
   ${activitySVG}
+  ${orgSectionSVG}
 
   <line x1="30" y1="${height - 35}" x2="${width - 30}" y2="${height - 35}" stroke="${theme.border}" stroke-width="1" />
   <text x="${width / 2}" y="${height - 14}" fill="${theme.textSecondary}" font-size="10" text-anchor="middle" font-family="${font}">Generated with a custom GitHub Action</text>
 </svg>`;
+}
+
+function escapeXml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 }
 
 // --- Main ---
@@ -489,8 +623,12 @@ async function main() {
   if (!TOKEN) {
     console.error("ERROR: No GitHub token found.");
     console.error("Set GH_TOKEN as a repository secret (Settings > Secrets > Actions).");
-    console.error("Create a PAT at: https://github.com/settings/tokens?type=beta");
-    console.error("Required scope: read:user (for contribution data)");
+    console.error("Create a classic PAT at: https://github.com/settings/tokens");
+    console.error("Required scopes:");
+    console.error("  - read:user       (public contributions)");
+    console.error("  - read:org        (organization memberships + org contributions)");
+    console.error("  - repo            (private repo contributions)");
+    console.error("Also enable: Profile > 'Include private contributions on my profile'");
     process.exit(1);
   }
 
@@ -519,12 +657,21 @@ async function main() {
   console.log("Fetching all-time contributions...");
   const contributions = await fetchAllContributions(profile.createdAt);
 
-  // 4. Generate SVG
+  // 4. Fetch per-organization contributions (commits, PRs, issues)
+  const orgs = profile.organizations?.nodes || [];
+  console.log(`Fetching contributions for ${orgs.length} organization(s)...`);
+  const orgContribs = await fetchOrgContributions(orgs, profile.createdAt);
+  if (orgContribs.length > 0) {
+    console.log(`  Active orgs: ${orgContribs.map((o) => `${o.login} (${o.commits}c/${o.prs}p/${o.issues}i)`).join(", ")}`);
+  }
+
+  // 5. Generate SVG
   console.log("Generating SVG...");
   const svg = generateSVG({
     contributions,
     repos: profile.repositories,
     languages,
+    orgContribs,
   });
 
   writeFileSync("stats.svg", svg);
