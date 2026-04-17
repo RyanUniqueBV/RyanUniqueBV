@@ -1,4 +1,4 @@
-import { writeFileSync } from "fs";
+import { writeFileSync, readFileSync, existsSync } from "fs";
 
 const USERNAME = "RyanUniqueBV";
 const TOKEN = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
@@ -52,23 +52,32 @@ async function rest(endpoint) {
   return res.json();
 }
 
-// --- Fetch user profile + repos + organizations ---
+// --- Fetch user profile + repos + organizations + contributed repos ---
 async function fetchProfile() {
+  const repoFields = `
+    name
+    stargazerCount
+    languages(first: 10, orderBy: { field: SIZE, direction: DESC }) {
+      edges {
+        size
+        node { name color }
+      }
+    }
+  `;
+
   const query = `
     query($login: String!) {
       user(login: $login) {
         createdAt
         repositories(first: 100, ownerAffiliations: OWNER, orderBy: { field: UPDATED_AT, direction: DESC }) {
           totalCount
+          nodes { ${repoFields} }
+        }
+        repositoriesContributedTo(first: 100, contributionTypes: [COMMIT], orderBy: { field: PUSHED_AT, direction: DESC }) {
+          totalCount
           nodes {
-            name
-            stargazerCount
-            languages(first: 10, orderBy: { field: SIZE, direction: DESC }) {
-              edges {
-                size
-                node { name color }
-              }
-            }
+            ${repoFields}
+            owner { login }
           }
         }
         organizations(first: 20) {
@@ -476,7 +485,7 @@ function generateSVG({ contributions, repos, languages, orgContribs = [] }) {
   const cellSize = 14;
   const cellGap = 3;
   const heatmapX = 50;
-  const heatmapY = 200;
+  const heatmapY = 220;
 
   let maxContrib = 0;
   for (const week of heatmapWeeks)
@@ -491,6 +500,25 @@ function generateSVG({ contributions, repos, languages, orgContribs = [] }) {
     if (ratio < 0.75) return theme.green[3];
     return theme.green[4];
   }
+
+  // Month labels above the heatmap — only when a month changes and prior label is far enough away
+  const monthLabelsList = [];
+  let lastLabeledWeek = -10;
+  let lastMonth = -1;
+  for (let w = 0; w < heatmapWeeks.length; w++) {
+    const days = heatmapWeeks[w].contributionDays;
+    if (!days || days.length === 0) continue;
+    const date = new Date(days[0].date);
+    const month = date.getMonth();
+    if (month !== lastMonth && w - lastLabeledWeek >= 3 && w < heatmapWeeks.length - 1) {
+      const x = heatmapX + w * (cellSize + cellGap);
+      const monthName = date.toLocaleDateString("en-US", { month: "short" });
+      monthLabelsList.push(`<text x="${x}" y="${heatmapY - 8}" fill="${theme.textSecondary}" font-size="10" font-family="${font}">${monthName}</text>`);
+      lastMonth = month;
+      lastLabeledWeek = w;
+    }
+  }
+  const monthLabelsSVG = monthLabelsList.join("\n  ");
 
   let heatmapCells = "";
   for (let w = 0; w < heatmapWeeks.length; w++) {
@@ -589,6 +617,7 @@ function generateSVG({ contributions, repos, languages, orgContribs = [] }) {
 
   <text x="30" y="170" fill="${theme.text}" font-size="13" font-weight="600" font-family="${font}">Contribution Activity</text>
   <text x="30" y="188" fill="${theme.textSecondary}" font-size="11" font-family="${font}">Last 26 weeks</text>
+  ${monthLabelsSVG}
   ${dayLabelsSVG}
   ${heatmapCells}
   <text x="${heatmapX}" y="${legendY + 10}" fill="${theme.textSecondary}" font-size="10" font-family="${font}">Less</text>
@@ -618,6 +647,65 @@ function escapeXml(s) {
     .replace(/'/g, "&apos;");
 }
 
+// --- README updater: refreshes the stats block between STATS markers ---
+function buildReadmeStatsBlock(startYear) {
+  const currentYear = new Date().getFullYear();
+  const base = `https://github.com/${USERNAME}`;
+  const yearLink = (y) =>
+    `<a href="${base}?tab=overview&from=${y}-01-01&to=${y}-12-31">${y}</a>`;
+
+  const years = [];
+  for (let y = currentYear; y >= startYear; y--) years.push(yearLink(y));
+
+  return `<!-- STATS:START -->
+<div align="center">
+  <a href="${base}">
+    <img src="stats.svg" alt="GitHub Activity Stats" width="840" />
+  </a>
+</div>
+
+<div align="center">
+  <sub>View period · ${years.join(" · ")}</sub>
+</div>
+<!-- STATS:END -->`;
+}
+
+function updateReadme(startYear) {
+  const readmePath = "README.md";
+  if (!existsSync(readmePath)) {
+    console.log("No README.md found — skipping README update.");
+    return;
+  }
+
+  const original = readFileSync(readmePath, "utf8");
+  const block = buildReadmeStatsBlock(startYear);
+  const markerPattern = /<!-- STATS:START -->[\s\S]*?<!-- STATS:END -->/;
+
+  let updated;
+  if (markerPattern.test(original)) {
+    updated = original.replace(markerPattern, block);
+  } else {
+    // First run: replace an existing stats image div with the marked block
+    const imgDivPattern =
+      /<div align="center">\s*<img src="stats\.svg"[^>]*\/?>\s*<\/div>/;
+    if (imgDivPattern.test(original)) {
+      updated = original.replace(imgDivPattern, block);
+    } else {
+      console.warn(
+        "Could not find stats section or markers in README — skipping update."
+      );
+      return;
+    }
+  }
+
+  if (updated !== original) {
+    writeFileSync(readmePath, updated);
+    console.log("README.md updated with stats block.");
+  } else {
+    console.log("README.md already up to date.");
+  }
+}
+
 // --- Main ---
 async function main() {
   if (!TOKEN) {
@@ -644,8 +732,11 @@ async function main() {
   console.log(`  Repos: ${profile.repositories.totalCount}`);
   console.log(`  Account created: ${profile.createdAt}`);
 
-  // 2. Process languages
-  let languages = processLanguages(profile.repositories.nodes);
+  // 2. Process languages — combine owned + contributed repos for fuller picture
+  const contributedRepos = profile.repositoriesContributedTo?.nodes || [];
+  console.log(`  Contributed repos: ${contributedRepos.length}`);
+  const allRepos = [...profile.repositories.nodes, ...contributedRepos];
+  let languages = processLanguages(allRepos);
   if (languages.length === 0) {
     console.log("  No languages from GraphQL, trying REST fallback...");
     const langMap = await fetchLanguagesREST(profile.repositories.nodes);
@@ -676,6 +767,10 @@ async function main() {
 
   writeFileSync("stats.svg", svg);
   console.log("stats.svg written successfully.");
+
+  // 6. Refresh README stats block with fresh year links
+  const startYear = contributions?.startYear || new Date(profile.createdAt).getFullYear();
+  updateReadme(startYear);
 }
 
 main().catch((err) => {

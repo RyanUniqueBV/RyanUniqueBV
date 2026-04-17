@@ -87,9 +87,17 @@ AI-Powered Workflows     ██████████████░░░░�
 
 ### Activity
 
+<!-- STATS:START -->
 <div align="center">
-  <img src="stats.svg" alt="GitHub Activity Stats" width="840" />
+  <a href="https://github.com/RyanUniqueBV">
+    <img src="stats.svg" alt="GitHub Activity Stats" width="840" />
+  </a>
 </div>
+
+<div align="center">
+  <sub>View period · <a href="https://github.com/RyanUniqueBV?tab=overview&from=2026-01-01&to=2026-12-31">2026</a> · <a href="https://github.com/RyanUniqueBV?tab=overview&from=2025-01-01&to=2025-12-31">2025</a> · <a href="https://github.com/RyanUniqueBV?tab=overview&from=2024-01-01&to=2024-12-31">2024</a> · <a href="https://github.com/RyanUniqueBV?tab=overview&from=2023-01-01&to=2023-12-31">2023</a> · <a href="https://github.com/RyanUniqueBV?tab=overview&from=2022-01-01&to=2022-12-31">2022</a></sub>
+</div>
+<!-- STATS:END -->
 
 ---
 
